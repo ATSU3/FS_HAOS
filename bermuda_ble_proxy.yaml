@@ -1,0 +1,150 @@
+substitutions:
+  device_name: atoms3r-03
+
+
+
+# Board: M5Stack AtomS3R
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_name}
+
+# LP5562（バックライト制御チップ）はESPHome標準ではないため外部から取得
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [lp5562]
+    refresh: 0s
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: 
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: 
+  password: 
+
+captive_portal:
+
+# --- 画面まわりのバス ---
+# バックライト制御チップ LP5562 が載る内部I2C
+i2c:
+  - id: bsp_bus
+    sda:
+      number: GPIO45
+      ignore_strapping_warning: true
+    scl:
+      number: GPIO0
+      ignore_strapping_warning: true
+    scan: true
+
+# LCDのSPI
+spi:
+  clk_pin: GPIO15
+  mosi_pin: GPIO21
+
+# バックライト（LP5562経由）
+lp5562:
+  id: lp5562_led
+  i2c_id: bsp_bus
+  use_internal_clk: true
+  white_current: 17.5
+
+output:
+  - platform: lp5562
+    id: lp5562_white_channel
+    lp5562_id: lp5562_led
+    channel: white
+
+light:
+  - platform: monochromatic
+    name: "LCD Backlight"
+    id: lcd_backlight
+    output: lp5562_white_channel
+    restore_mode: RESTORE_DEFAULT_ON
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 14
+
+# --- 表示に使う情報 ---
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    update_interval: 5s
+
+binary_sensor:
+  - platform: status
+    id: ha_status
+
+globals:
+  - id: ble_total
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: ble_window
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: ble_rate
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+# 5秒ごとに直近の受信数を確定
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          id(ble_rate) = id(ble_window);
+          id(ble_window) = 0;
+
+# --- BLEプロキシ本体（受信のたびにカウント） ---
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+  on_ble_advertise:
+    then:
+      - lambda: |-
+          id(ble_total) += 1;
+          id(ble_window) += 1;
+
+bluetooth_proxy:
+  active: true
+
+# --- 画面表示 ---
+display:
+  - platform: mipi_spi
+    id: atoms3r_lcd
+    model: ST7789V
+    dc_pin: GPIO42
+    reset_pin: GPIO48
+    cs_pin: GPIO14
+    data_rate: 40MHz
+    update_interval: 1s
+    dimensions:
+      width: 128
+      height: 128
+      offset_width: 2
+      offset_height: 1
+    invert_colors: true
+    rotation: 0°
+    lambda: |-
+      it.fill(Color::BLACK);
+      it.printf(6, 2,  id(font_medium), Color(0, 200, 255), "${device_name}");
+      it.printf(6, 24, id(font_medium), Color::WHITE, "WiFi:%.0fdBm", id(wifi_rssi).state);
+      auto ha = id(ha_status).state;
+      it.printf(6, 46, id(font_medium), ha ? Color(0,255,0) : Color(255,80,80), "HA:%s", ha ? "OK" : "NG");
+      it.printf(6, 68, id(font_medium), Color::WHITE, "BLE/5s:%d", id(ble_rate));
+      it.printf(6, 90, id(font_medium), Color::WHITE, "Total:%d", id(ble_total));
