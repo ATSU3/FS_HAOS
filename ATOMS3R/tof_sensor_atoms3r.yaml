@@ -1,0 +1,278 @@
+# Board: M5Stack AtomS3 (M5Stack)
+# Definition: definitions/boards/m5stack-atoms3/manifest.yaml
+
+esphome:
+  name: tof-sensor
+  friendly_name: tof-sensor
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: 
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: 
+  password: 
+
+
+captive_portal:
+
+  
+# -----------------------------------------------------
+# I2C (AtomS3 の Grove ポート)
+# -----------------------------------------------------
+i2c:
+  sda: GPIO2
+  scl: GPIO1
+  scan: true
+  frequency: 400kHz
+ 
+ 
+# -----------------------------------------------------
+# グローバル変数（通過カウント用）
+# -----------------------------------------------------
+globals:
+  - id: pass_count
+    type: int
+    restore_value: true
+    initial_value: '0'
+ 
+ 
+# -----------------------------------------------------
+# センサー
+# -----------------------------------------------------
+sensor:
+  # --- ToF 本体（ESPHome の出力単位は「メートル」）---
+  - platform: vl53l0x
+    name: "Distance (m)"
+    id: tof_raw
+    address: 0x29
+    long_range: true          # true: ~2m まで / false: ~1.2m だが高精度
+    timeout: 200us
+    update_interval: 200ms
+    accuracy_decimals: 3
+    internal: true            # HA には mm 版だけ出す
+    filters:
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 3
+ 
+  # --- mm 換算（HA・表示用のメイン値）---
+  - platform: template
+    name: "距離"
+    id: tof_mm
+    lambda: |-
+      if (isnan(id(tof_raw).state)) return NAN;
+      return id(tof_raw).state * 1000.0;
+    unit_of_measurement: "mm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 1s
+ 
+  # --- 通過カウント ---
+  - platform: template
+    name: "通過カウント"
+    id: pass_counter
+    lambda: 'return id(pass_count);'
+    unit_of_measurement: "回"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: 1s
+ 
+  # --- WiFi 電波強度 ---
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: rssi
+    update_interval: 60s
+ 
+ 
+# -----------------------------------------------------
+# 検知しきい値（HA から変更可能）
+# -----------------------------------------------------
+number:
+  - platform: template
+    name: "検知しきい値"
+    id: threshold_mm
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 30
+    max_value: 2000
+    step: 10
+    unit_of_measurement: "mm"
+    mode: box
+ 
+ 
+# -----------------------------------------------------
+# バイナリセンサー
+# -----------------------------------------------------
+binary_sensor:
+  # --- HA 接続状態 ---
+  - platform: status
+    id: ha_status
+ 
+  # --- 物体検知（しきい値より近い＝ON）---
+  - platform: template
+    name: "物体検知"
+    id: object_detected
+    device_class: occupancy
+    lambda: |-
+      if (isnan(id(tof_raw).state)) return false;
+      return (id(tof_raw).state * 1000.0) < id(threshold_mm).state;
+    filters:
+      - delayed_on: 50ms       # チャタリング防止
+      - delayed_off: 300ms     # 抜けきるまで待つ
+    on_press:
+      then:
+        - lambda: 'id(pass_count) += 1;'
+ 
+  # --- 本体ボタン（長押しでカウントリセット）---
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Button"
+    id: atom_button
+    on_multi_click:
+      - timing:
+          - ON for at least 1s
+        then:
+          - lambda: 'id(pass_count) = 0;'
+ 
+ 
+# -----------------------------------------------------
+# カウントリセット用ボタン（HA 側から）
+# -----------------------------------------------------
+button:
+  - platform: template
+    name: "カウントリセット"
+    on_press:
+      then:
+        - lambda: 'id(pass_count) = 0;'
+ 
+ 
+# -----------------------------------------------------
+# 内蔵 LCD (AtomS3: GC9107 128x128)
+# -----------------------------------------------------
+spi:
+  clk_pin: GPIO17
+  mosi_pin: GPIO21
+ 
+output:
+  - platform: ledc
+    pin: GPIO16
+    id: bl_output
+ 
+light:
+  - platform: monochromatic
+    output: bl_output
+    name: "LCD Backlight"
+    id: lcd_backlight
+    restore_mode: ALWAYS_ON
+ 
+color:
+  - id: c_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: c_gray
+    red: 45%
+    green: 45%
+    blue: 45%
+  - id: c_bar
+    red: 12%
+    green: 12%
+    blue: 18%
+  - id: c_green
+    red: 15%
+    green: 85%
+    blue: 30%
+  - id: c_red
+    red: 95%
+    green: 25%
+    blue: 25%
+  - id: c_violet
+    red: 70%
+    green: 45%
+    blue: 100%
+ 
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 13
+    glyphs: '!"%()+=,-_.:/°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
+  - file: "gfonts://Roboto"
+    id: font_m
+    size: 18
+    glyphs: '%.-/°0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ '
+  - file: "gfonts://Roboto@700"
+    id: font_l
+    size: 38
+    glyphs: '.-0123456789 '
+ 
+display:
+  - platform: mipi_spi
+    model: GC9107
+    id: atoms3_lcd
+    cs_pin: GPIO15
+    dc_pin: GPIO33
+    reset_pin: GPIO34
+    dimensions:
+      width: 128
+      height: 128
+    invert_colors: true
+    transform: disabled
+    rotation: 180
+    update_interval: 1s
+    lambda: |-
+      it.fill(Color::BLACK);
+ 
+      const bool wifi_ok = wifi::global_wifi_component->is_connected();
+      const bool api_ok  = id(ha_status).state;
+ 
+      // ---- ステータスバー ----
+      it.filled_rectangle(0, 0, 128, 18, id(c_bar));
+      it.print(4, 9, id(font_s), id(c_white), TextAlign::CENTER_LEFT, "WiFi");
+      it.filled_circle(38, 9, 4, wifi_ok ? id(c_green) : id(c_red));
+      it.print(54, 9, id(font_s), id(c_white), TextAlign::CENTER_LEFT, "HA");
+      it.filled_circle(80, 9, 4, api_ok ? id(c_green) : id(c_red));
+      if (id(rssi).has_state()) {
+        it.printf(125, 9, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT,
+                  "%.0f", id(rssi).state);
+      }
+ 
+      // ---- 距離（大きく中央）----
+      if (id(tof_mm).has_state() && !isnan(id(tof_mm).state)) {
+        it.printf(64, 48, id(font_l),
+                  id(object_detected).state ? id(c_red) : id(c_violet),
+                  TextAlign::CENTER, "%.0f", id(tof_mm).state);
+        it.print(120, 34, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT, "mm");
+      } else {
+        it.print(64, 48, id(font_l), id(c_gray), TextAlign::CENTER, "----");
+        it.print(120, 34, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT, "mm");
+      }
+ 
+      // ---- しきい値 ----
+      it.printf(64, 82, id(font_m), id(c_white), TextAlign::CENTER,
+                "th %.0f mm", id(threshold_mm).state);
+ 
+      // ---- 通過カウント ----
+      it.printf(64, 106, id(font_m),
+                id(object_detected).state ? id(c_red) : id(c_white),
+                TextAlign::CENTER, "count %d", id(pass_count));
+

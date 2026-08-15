@@ -1,0 +1,187 @@
+# Board: M5Stack AtomS3 (M5Stack)
+# Definition: definitions/boards/m5stack-atoms3/manifest.yaml
+
+esphome:
+  name: env-sensor
+  friendly_name: env-sensor
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: 
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: 
+  password: 
+
+captive_portal:
+
+# AtomS3 の Grove ポート
+i2c:
+  sda: GPIO2
+  scl: GPIO1
+  scan: true
+  frequency: 100kHz
+
+# --- 内蔵LCD ---
+spi:
+  clk_pin: GPIO17
+  mosi_pin: GPIO21
+
+output:
+  - platform: ledc
+    pin: GPIO16
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    output: backlight_output
+    id: backlight
+    name: "Backlight"
+    restore_mode: ALWAYS_ON
+
+color:
+  - id: col_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: col_gray
+    red: 45%
+    green: 45%
+    blue: 45%
+  - id: col_bar
+    red: 12%
+    green: 12%
+    blue: 18%
+  - id: col_green
+    red: 15%
+    green: 85%
+    blue: 30%
+  - id: col_red
+    red: 95%
+    green: 25%
+    blue: 25%
+  - id: col_cyan
+    red: 30%
+    green: 85%
+    blue: 95%
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 13
+    glyphs: '!"%()+=,-_.:°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
+  - file: "gfonts://Roboto"
+    id: font_m
+    size: 18
+    glyphs: '%.-°0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ '
+  - file: "gfonts://Roboto@700"
+    id: font_l
+    size: 38
+    glyphs: '.-°0123456789 '
+
+display:
+  - platform: st7789v
+    model: Custom
+    height: 128
+    width: 128
+    offset_height: 1
+    offset_width: 2
+    cs_pin: GPIO15
+    dc_pin: GPIO33
+    reset_pin: GPIO34
+    rotation: 180        # ← 0 から 180 に変更
+    update_interval: 1s
+    lambda: |-
+      it.fill(Color::BLACK);
+
+      const bool wifi_ok = wifi::global_wifi_component->is_connected();
+      const bool api_ok  = api::global_api_server->is_connected();
+
+      // ステータスバー
+      it.filled_rectangle(0, 0, 128, 18, id(col_bar));
+      it.print(4, 9, id(font_s), id(col_white), TextAlign::CENTER_LEFT, "WiFi");
+      it.filled_circle(38, 9, 4, wifi_ok ? id(col_green) : id(col_red));
+      it.print(54, 9, id(font_s), id(col_white), TextAlign::CENTER_LEFT, "HA");
+      it.filled_circle(80, 9, 4, api_ok ? id(col_green) : id(col_red));
+      if (id(rssi).has_state()) {
+        it.printf(125, 9, id(font_s), id(col_gray), TextAlign::CENTER_RIGHT,
+                  "%.0f", id(rssi).state);
+      }
+
+      // 温度
+      if (id(sht_temp).has_state()) {
+        it.printf(64, 48, id(font_l), id(col_cyan), TextAlign::CENTER,
+                  "%.1f", id(sht_temp).state);
+        it.print(120, 34, id(font_s), id(col_cyan), TextAlign::CENTER_RIGHT, "°C");
+      } else {
+        it.print(64, 48, id(font_l), id(col_gray), TextAlign::CENTER, "--.-");
+      }
+
+      // 湿度・気圧
+      if (id(sht_hum).has_state()) {
+        it.printf(64, 82, id(font_m), id(col_white), TextAlign::CENTER,
+                  "%.1f %%RH", id(sht_hum).state);
+      } else {
+        it.print(64, 82, id(font_m), id(col_gray), TextAlign::CENTER, "--.- %%RH");
+      }
+
+      if (id(bmp_press).has_state()) {
+        it.printf(64, 106, id(font_m), id(col_white), TextAlign::CENTER,
+                  "%.1f hPa", id(bmp_press).state);
+      } else {
+        it.print(64, 106, id(font_m), id(col_gray), TextAlign::CENTER, "---.- hPa");
+      }
+  
+sensor:
+  - platform: sht4x
+    address: 0x44
+    temperature:
+      name: "Temperature"
+      id: sht_temp
+      accuracy_decimals: 1
+    humidity:
+      name: "Humidity"
+      id: sht_hum
+      accuracy_decimals: 1
+    update_interval: 30s
+
+  - platform: bmp280_i2c
+    address: 0x76
+    temperature:
+      name: "Pressure Sensor Temperature"
+      id: bmp_temp
+      internal: true
+    pressure:
+      name: "Pressure"
+      id: bmp_press
+      accuracy_decimals: 1
+    iir_filter: 16x
+    update_interval: 30s
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: rssi
+    update_interval: 60s
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Button"
+
+
