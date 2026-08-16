@@ -1,0 +1,208 @@
+# Board: M5Stack AtomS3R + Unit ENV III (SHT30 + QMP6988)
+# BTHome (BLE アドバタイズ) 版
+# AtomS3 版からの移植: LCDドライバ / SPIピン / バックライト制御が変更
+# rotation は S3R では正しく効かないため未指定
+
+esphome:
+  name: atoms3r-bthome-env3
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+# AtomS3R は 8MB Octal PSRAM 搭載
+# BLE スタックと LCD バッファを併用するので有効化しておく
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  # BTHome（BLEアドバタイズ）
+  - source:
+      type: git
+      url: https://github.com/dz0ny/esphome-bthome
+      ref: main
+    components: [bthome]
+  # lp5562（バックライト制御IC）は ESPHome 本体に入っていない
+  - source: github://m5stack/esphome-yaml/components
+    components: [lp5562]
+    refresh: 0s
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+# ---------- I2C ----------
+# AtomS3R は内部バス（LP5562, IMU）と Grove バス（ENV III）の2系統
+i2c:
+  # 内部バス: LP5562 (0x30), BMI270 (0x68), BMM150
+  # GPIO45 / GPIO0 は strapping pin のため警告抑制が必要
+  - id: bsp_bus
+    sda:
+      number: GPIO45
+      ignore_strapping_warning: true
+    scl:
+      number: GPIO0
+      ignore_strapping_warning: true
+    scan: true
+
+  # Grove ポート: ENV III（AtomS3 と同じピン）
+  - id: grove_bus
+    sda: GPIO2
+    scl: GPIO1
+    scan: true
+
+# ---------- SPI（内蔵LCD）----------
+# AtomS3: CLK=GPIO17 → AtomS3R: CLK=GPIO15
+spi:
+  clk_pin: GPIO15
+  mosi_pin: GPIO21
+
+# ---------- バックライト（LP5562 経由）----------
+# AtomS3 の GPIO16 + ledc は AtomS3R では使えない
+lp5562:
+  id: lp5562_led
+  i2c_id: bsp_bus
+  use_internal_clk: true
+  white_current: 17.5
+
+output:
+  - platform: lp5562
+    id: backlight_output
+    lp5562_id: lp5562_led
+    channel: white
+
+light:
+  - platform: monochromatic
+    output: backlight_output
+    id: backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 0s
+
+# ---------- フォント ----------
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 11
+  - file: "gfonts://Roboto"
+    id: font_m
+    size: 16
+  - file: "gfonts://Roboto@700"
+    id: font_l
+    size: 26
+
+color:
+  - id: c_bg
+    hex: "000000"
+  - id: c_title
+    hex: "00C8FF"
+  - id: c_val
+    hex: "FFFFFF"
+  - id: c_sub
+    hex: "888888"
+  - id: c_ok
+    hex: "00FF64"
+
+# ---------- センサー ----------
+sensor:
+  - platform: sht3xd
+    i2c_id: grove_bus
+    address: 0x44
+    temperature:
+      id: temp
+    humidity:
+      id: humi
+    update_interval: 10s
+
+  - platform: qmp6988
+    i2c_id: grove_bus
+    address: 0x70
+    iir_filter: 4x
+    pressure:
+      id: pres
+      oversampling: 8x
+    temperature:
+      id: temp_qmp
+      internal: true
+    update_interval: 10s
+
+  - platform: uptime
+    id: sys_uptime
+    update_interval: 5s
+
+# ---------- BTHome ----------
+bthome:
+  ble_stack: nimble
+  min_interval: 5s
+  max_interval: 10s
+  tx_power: 0
+  sensors:
+    - type: temperature
+      id: temp
+    - type: humidity
+      id: humi
+    - type: pressure
+      id: pres
+
+# ---------- ディスプレイ ----------
+# AtomS3: ili9xxx / CS=15 DC=33 RST=34
+# AtomS3R: mipi_spi ST7789V / CS=14 DC=42 RST=48
+display:
+  - platform: mipi_spi
+    model: ST7789V
+    id: atoms3r_lcd
+    cs_pin: GPIO14
+    dc_pin: GPIO42
+    reset_pin: GPIO48
+    data_rate: 40MHz
+    invert_colors: true
+    dimensions:
+      width: 128
+      height: 128
+      offset_width: 2
+      offset_height: 1
+    update_interval: 1s
+    lambda: |-
+      it.fill(id(c_bg));
+
+      // ヘッダー
+      it.print(4, 2, id(font_s), id(c_title), "BTHome / BLE ADV");
+      it.line(0, 16, 128, 16, id(c_sub));
+
+      // 温度（大きく）
+      if (id(temp).has_state()) {
+        it.printf(4, 20, id(font_l), id(c_val), "%.1f", id(temp).state);
+        it.print(78, 30, id(font_m), id(c_sub), "C");
+      } else {
+        it.print(4, 24, id(font_m), id(c_sub), "-- .-");
+      }
+
+      // 湿度・気圧
+      if (id(humi).has_state())
+        it.printf(4, 54, id(font_m), id(c_val), "RH  %.1f %%", id(humi).state);
+      if (id(pres).has_state())
+        it.printf(4, 74, id(font_m), id(c_val), "P   %.0f hPa", id(pres).state);
+
+      // ステータス
+      it.line(0, 96, 128, 96, id(c_sub));
+      it.print(4, 99, id(font_s), id(c_ok), "ADV 5-10s / NimBLE");
+
+      // BLE MAC（HA登録時の識別用）
+      std::string mac = get_mac_address_pretty();
+      it.printf(4, 112, id(font_s), id(c_sub), "%s", mac.c_str());
+
+# ---------- 本体ボタンでバックライト切替 ----------
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    id: front_button
+    on_click:
+      then:
+        - light.toggle: backlight

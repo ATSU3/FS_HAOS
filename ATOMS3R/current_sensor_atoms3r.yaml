@@ -1,0 +1,196 @@
+# Board: M5Stack AtomS3R
+# AtomS3 版からの移植: LCDドライバ / SPIピン / バックライト制御が変更
+# rotation は S3R では正しく効かないため未指定
+
+esphome:
+  name: current-sensor
+  friendly_name: current-sensor
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+# ---------- 外部コンポーネント ----------
+# lp5562（バックライト制御IC）は ESPHome 本体に入っていない
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [lp5562]
+    refresh: 0s
+
+logger:
+
+api:
+  encryption:
+    key:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid:
+  password:
+
+captive_portal:
+
+# ---------- センサー ----------
+sensor:
+  - platform: wifi_signal
+    id: wifi_rssi
+    update_interval: 10s
+
+  - platform: adc
+    pin: GPIO1              # Grove G1 / 黄（信号）※AtomS3R も同じ
+    id: adc_ct
+    attenuation: 12db       # ~0-3.1V フルスケール（古い版なら 11db）
+    update_interval: never  # ct_clampが直接サンプリングするのでnever
+
+  - platform: ct_clamp
+    sensor: adc_ct
+    name: "電流"
+    id: measured_current
+    sample_duration: 200ms  # 50/60Hzどちらも整数周期（浜松は60Hz）
+    update_interval: 5s
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 2
+    filters:
+      - calibrate_linear:
+          - 0.01 -> 0.0
+          - 0.42 -> 1.3  # ←この値は必ず実測して置き換える
+
+  # 皮相電力（単相100Vと仮定）
+  - platform: template
+    name: "apparent power"
+    id: apparent_power
+    lambda: 'return id(measured_current).state * 100.0;'
+    unit_of_measurement: "VA"
+    accuracy_decimals: 0
+    update_interval: 5s
+
+  # 力率を掛けた推定消費電力
+  - platform: template
+    name: "estimated power"
+    id: est_power
+    lambda: 'return id(measured_current).state * 100.0 * 0.85;'  # 0.85=想定力率
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    update_interval: 5s
+
+  # 日積算電力量
+  - platform: total_daily_energy
+    name: "Daily accumulated electric energy"
+    power_id: est_power
+    unit_of_measurement: "kWh"
+    filters:
+      - multiply: 0.001
+    device_class: energy
+    state_class: total_increasing
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+binary_sensor:
+  - platform: status
+    id: ha_status      # ON=Home Assistantに接続中
+
+# ---------- I2C（内部バス）----------
+# バックライト制御IC LP5562 (0x30) が接続されている
+# GPIO45 / GPIO0 は strapping pin のため警告抑制が必要
+i2c:
+  - id: bsp_bus
+    sda:
+      number: GPIO45
+      ignore_strapping_warning: true
+    scl:
+      number: GPIO0
+      ignore_strapping_warning: true
+    scan: true
+
+# ---------- SPI（内蔵LCD）----------
+# AtomS3: CLK=GPIO17 → AtomS3R: CLK=GPIO15
+spi:
+  clk_pin: GPIO15
+  mosi_pin: GPIO21
+
+# ---------- バックライト（LP5562 経由）----------
+# AtomS3 の GPIO16 + ledc は AtomS3R では使えない
+lp5562:
+  id: lp5562_led
+  i2c_id: bsp_bus
+  use_internal_clk: true
+  white_current: 17.5
+
+output:
+  - platform: lp5562
+    id: bl_output
+    lp5562_id: lp5562_led
+    channel: white
+
+light:
+  - platform: monochromatic
+    output: bl_output
+    name: "LCD Backlight"
+    id: lcd_backlight
+    restore_mode: RESTORE_DEFAULT_ON
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 15
+  - file: "gfonts://Roboto@700"
+    id: font_big
+    size: 30
+
+color:
+  - id: c_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: c_green
+    green: 100%
+  - id: c_red
+    red: 100%
+
+# ---------- ディスプレイ ----------
+# AtomS3: GC9107 / CS=15 DC=33 RST=34
+# AtomS3R: ST7789V / CS=14 DC=42 RST=48 + オフセット必須
+display:
+  - platform: mipi_spi
+    model: ST7789V
+    id: atoms3r_lcd
+    cs_pin: GPIO14
+    dc_pin: GPIO42
+    reset_pin: GPIO48
+    data_rate: 40MHz
+    dimensions:
+      width: 128
+      height: 128
+      offset_width: 2
+      offset_height: 1
+    invert_colors: true
+    update_interval: 1s
+    lambda: |-
+      it.fill(Color::BLACK);
+      // タイトル
+      it.print(4, 2, id(font_small), id(c_white), "current-sensor");
+      // WiFi RSSI
+      if (id(wifi_rssi).has_state()) {
+        it.printf(4, 22, id(font_small), id(c_white), "WiFi %.0f dBm", id(wifi_rssi).state);
+      } else {
+        it.print(4, 22, id(font_small), id(c_red), "WiFi --");
+      }
+      // HA接続状態（緑=接続 / 赤=切断）
+      it.print(4, 40, id(font_small),
+               id(ha_status).state ? id(c_green) : id(c_red),
+               id(ha_status).state ? "HA connected" : "HA offline");
+      // 電流値（大きく中央）
+      if (id(measured_current).has_state()) {
+        it.printf(64, 74, id(font_big), id(c_white), TextAlign::TOP_CENTER,
+                  "%.2f A", id(measured_current).state);
+      } else {
+        it.print(64, 74, id(font_big), id(c_white), TextAlign::TOP_CENTER, "-- A");
+      }

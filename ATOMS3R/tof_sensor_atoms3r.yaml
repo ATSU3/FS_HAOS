@@ -1,0 +1,312 @@
+# Board: M5Stack AtomS3R + Unit ToF (VL53L0X)
+# AtomS3 版からの移植: LCDドライバ / SPIピン / バックライト制御が変更
+# rotation は S3R では正しく効かないため未指定
+
+esphome:
+  name: tof-sensor
+  friendly_name: tof-sensor
+
+esp32:
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+# -----------------------------------------------------
+# 外部コンポーネント
+# lp5562（バックライト制御IC）は ESPHome 本体に入っていない
+# -----------------------------------------------------
+external_components:
+  - source: github://m5stack/esphome-yaml/components
+    components: [lp5562]
+    refresh: 0s
+
+logger:
+
+api:
+  encryption:
+    key:
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid:
+  password:
+
+captive_portal:
+
+
+# -----------------------------------------------------
+# I2C
+# AtomS3R は内部バス（LP5562, IMU）と Grove バス（ToF）の2系統
+# -----------------------------------------------------
+i2c:
+  # 内部バス: LP5562 (0x30), BMI270 (0x68), BMM150
+  # GPIO45 / GPIO0 は strapping pin のため警告抑制が必要
+  - id: bsp_bus
+    sda:
+      number: GPIO45
+      ignore_strapping_warning: true
+    scl:
+      number: GPIO0
+      ignore_strapping_warning: true
+    scan: true
+    frequency: 100kHz
+
+  # Grove ポート: Unit ToF（AtomS3 と同じピン）
+  - id: grove_bus
+    sda: GPIO2
+    scl: GPIO1
+    scan: true
+    frequency: 400kHz
+
+
+# -----------------------------------------------------
+# グローバル変数（通過カウント用）
+# -----------------------------------------------------
+globals:
+  - id: pass_count
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+
+# -----------------------------------------------------
+# センサー
+# -----------------------------------------------------
+sensor:
+  # --- ToF 本体（ESPHome の出力単位は「メートル」）---
+  - platform: vl53l0x
+    i2c_id: grove_bus
+    name: "Distance (m)"
+    id: tof_raw
+    address: 0x29
+    long_range: true          # true: ~2m まで / false: ~1.2m だが高精度
+    timeout: 200us
+    update_interval: 200ms
+    accuracy_decimals: 3
+    internal: true            # HA には mm 版だけ出す
+    filters:
+      - median:
+          window_size: 5
+          send_every: 5
+          send_first_at: 3
+
+  # --- mm 換算（HA・表示用のメイン値）---
+  - platform: template
+    name: "距離"
+    id: tof_mm
+    lambda: |-
+      if (isnan(id(tof_raw).state)) return NAN;
+      return id(tof_raw).state * 1000.0;
+    unit_of_measurement: "mm"
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 1s
+
+  # --- 通過カウント ---
+  - platform: template
+    name: "通過カウント"
+    id: pass_counter
+    lambda: 'return id(pass_count);'
+    unit_of_measurement: "回"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: 1s
+
+  # --- WiFi 電波強度 ---
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: rssi
+    update_interval: 60s
+
+
+# -----------------------------------------------------
+# 検知しきい値（HA から変更可能）
+# -----------------------------------------------------
+number:
+  - platform: template
+    name: "検知しきい値"
+    id: threshold_mm
+    optimistic: true
+    restore_value: true
+    initial_value: 300
+    min_value: 30
+    max_value: 2000
+    step: 10
+    unit_of_measurement: "mm"
+    mode: box
+
+
+# -----------------------------------------------------
+# バイナリセンサー
+# -----------------------------------------------------
+binary_sensor:
+  # --- HA 接続状態 ---
+  - platform: status
+    id: ha_status
+
+  # --- 物体検知（しきい値より近い＝ON）---
+  - platform: template
+    name: "物体検知"
+    id: object_detected
+    device_class: occupancy
+    lambda: |-
+      if (isnan(id(tof_raw).state)) return false;
+      return (id(tof_raw).state * 1000.0) < id(threshold_mm).state;
+    filters:
+      - delayed_on: 50ms       # チャタリング防止
+      - delayed_off: 300ms     # 抜けきるまで待つ
+    on_press:
+      then:
+        - lambda: 'id(pass_count) += 1;'
+
+  # --- 本体ボタン（長押しでカウントリセット）---
+  - platform: gpio
+    pin:
+      number: GPIO41
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Button"
+    id: atom_button
+    on_multi_click:
+      - timing:
+          - ON for at least 1s
+        then:
+          - lambda: 'id(pass_count) = 0;'
+
+
+# -----------------------------------------------------
+# カウントリセット用ボタン（HA 側から）
+# -----------------------------------------------------
+button:
+  - platform: template
+    name: "カウントリセット"
+    on_press:
+      then:
+        - lambda: 'id(pass_count) = 0;'
+
+
+# -----------------------------------------------------
+# 内蔵 LCD (AtomS3R: ST7789V 128x128)
+# AtomS3: CLK=GPIO17 → AtomS3R: CLK=GPIO15
+# -----------------------------------------------------
+spi:
+  clk_pin: GPIO15
+  mosi_pin: GPIO21
+
+# バックライトは LP5562 経由（AtomS3 の GPIO16 + ledc は使えない）
+lp5562:
+  id: lp5562_led
+  i2c_id: bsp_bus
+  use_internal_clk: true
+  white_current: 17.5
+
+output:
+  - platform: lp5562
+    id: bl_output
+    lp5562_id: lp5562_led
+    channel: white
+
+light:
+  - platform: monochromatic
+    output: bl_output
+    name: "LCD Backlight"
+    id: lcd_backlight
+    restore_mode: RESTORE_DEFAULT_ON
+
+color:
+  - id: c_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: c_gray
+    red: 45%
+    green: 45%
+    blue: 45%
+  - id: c_bar
+    red: 12%
+    green: 12%
+    blue: 18%
+  - id: c_green
+    red: 15%
+    green: 85%
+    blue: 30%
+  - id: c_red
+    red: 95%
+    green: 25%
+    blue: 25%
+  - id: c_violet
+    red: 70%
+    green: 45%
+    blue: 100%
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_s
+    size: 13
+    glyphs: '!"%()+=,-_.:/°0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz '
+  - file: "gfonts://Roboto"
+    id: font_m
+    size: 18
+    glyphs: '%.-/°0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ '
+  - file: "gfonts://Roboto@700"
+    id: font_l
+    size: 38
+    glyphs: '.-0123456789 '
+
+display:
+  - platform: mipi_spi
+    model: ST7789V
+    id: atoms3r_lcd
+    cs_pin: GPIO14
+    dc_pin: GPIO42
+    reset_pin: GPIO48
+    data_rate: 40MHz
+    dimensions:
+      width: 128
+      height: 128
+      offset_width: 2
+      offset_height: 1
+    invert_colors: true
+    update_interval: 1s
+    lambda: |-
+      it.fill(Color::BLACK);
+
+      const bool wifi_ok = wifi::global_wifi_component->is_connected();
+      const bool api_ok  = id(ha_status).state;
+
+      // ---- ステータスバー ----
+      it.filled_rectangle(0, 0, 128, 18, id(c_bar));
+      it.print(4, 9, id(font_s), id(c_white), TextAlign::CENTER_LEFT, "WiFi");
+      it.filled_circle(38, 9, 4, wifi_ok ? id(c_green) : id(c_red));
+      it.print(54, 9, id(font_s), id(c_white), TextAlign::CENTER_LEFT, "HA");
+      it.filled_circle(80, 9, 4, api_ok ? id(c_green) : id(c_red));
+      if (id(rssi).has_state()) {
+        it.printf(125, 9, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT,
+                  "%.0f", id(rssi).state);
+      }
+
+      // ---- 距離（大きく中央）----
+      if (id(tof_mm).has_state() && !isnan(id(tof_mm).state)) {
+        it.printf(64, 48, id(font_l),
+                  id(object_detected).state ? id(c_red) : id(c_violet),
+                  TextAlign::CENTER, "%.0f", id(tof_mm).state);
+        it.print(120, 34, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT, "mm");
+      } else {
+        it.print(64, 48, id(font_l), id(c_gray), TextAlign::CENTER, "----");
+        it.print(120, 34, id(font_s), id(c_gray), TextAlign::CENTER_RIGHT, "mm");
+      }
+
+      // ---- しきい値 ----
+      it.printf(64, 82, id(font_m), id(c_white), TextAlign::CENTER,
+                "th %.0f mm", id(threshold_mm).state);
+
+      // ---- 通過カウント ----
+      it.printf(64, 106, id(font_m),
+                id(object_detected).state ? id(c_red) : id(c_white),
+                TextAlign::CENTER, "count %d", id(pass_count));
