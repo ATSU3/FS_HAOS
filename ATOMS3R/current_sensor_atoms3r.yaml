@@ -3,8 +3,8 @@
 # rotation は S3R では正しく効かないため未指定
 
 esphome:
-  name: current-sensor
-  friendly_name: current-sensor
+  name: current-sensor-r
+  friendly_name: current-sensor-r
 
 esp32:
   variant: esp32s3
